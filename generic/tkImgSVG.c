@@ -932,3 +932,32 @@ Tksvg_Init(Tcl_Interp *interp)
     Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION);
     return TCL_OK;
 }
+
+int DLLEXPORT
+Tksvg_SafeInit(Tcl_Interp *interp)
+{
+    if (interp == NULL) {
+        return TCL_ERROR;
+    }
+#ifdef USE_TCL_STUBS
+    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+	return TCL_ERROR;
+    }
+#else
+    if (Tcl_PkgRequire(interp, "Tcl", TCL_VERSION, 0) == NULL) {
+	return TCL_ERROR;
+    }
+#endif
+#ifdef USE_TK_STUBS
+    if (Tk_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+	return TCL_ERROR;
+    }
+#else
+    if (Tcl_PkgRequire(interp, "Tk", TK_VERSION, 0) == NULL) {
+	return TCL_ERROR;
+    }
+#endif
+    Tk_CreatePhotoImageFormat(&tkImgFmtSVGnano);
+    Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION);
+    return TCL_OK;
+}
