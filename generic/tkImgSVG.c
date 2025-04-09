@@ -77,6 +77,16 @@ typedef struct {
     RastOpts ropts;
 } NSVGcache;
 
+/*
+ * Per thread information to track registration of the
+ * photo image format.
+ */
+
+typedef struct {
+    int registered;
+} ThreadSpecificData;
+static Tcl_ThreadDataKey dataKey;
+
 static const void *	MemMem(const void *haystack, size_t haysize,
 			       const void *needle, size_t needlen);
 static int		FileMatchSVG(Tcl_Channel chan, const char *fileName,
@@ -109,6 +119,10 @@ static NSVGimage *	GetCachedSVG(Tcl_Interp *interp, ClientData dataOrChan,
 			    Tcl_Obj *formatObj, RastOpts *ropts);
 static void		CleanCache(Tcl_Interp *interp);
 static void		FreeCache(ClientData clientData, Tcl_Interp *interp);
+static int		RegisterObjCmd(ClientData clientData,
+			    Tcl_Interp *interp, int objc, Tcl_Obj *const *objv);
+static int		RenderObjCmd(ClientData clientData,
+			    Tcl_Interp *interp, int objc, Tcl_Obj *const *objv);
 
 /*
  * The format record for the SVG nano file format:
@@ -903,10 +917,337 @@ FreeCache(ClientData clientData, Tcl_Interp *interp)
     ckfree(cachePtr);
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * RegisterObjCmd --
+ *
+ *	This function is called to register the "tksvg" photo image
+ *	format and to setup per interpreter info.
+ *
+ * Results:
+ *	Standard Tcl result.
+ *
+ *----------------------------------------------------------------------
+ */
+
+int
+RegisterObjCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const *objv)
+{
+    NSVGcache *cachePtr;
+    ThreadSpecificData *tsdPtr;
+
+    if (objc != 1) {
+	Tcl_WrongNumArgs(interp, 1, objv, NULL);
+	return TCL_ERROR;
+    }
+
+    cachePtr = (NSVGcache *) Tcl_GetAssocData(interp, "tksvgnano", NULL);
+    if (cachePtr == NULL) {
+#ifdef USE_TK_STUBS
+	if (Tk_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+	    return TCL_ERROR;
+	}
+#else
+	if (Tcl_PkgRequire(interp, "Tk", TK_VERSION, 0) == NULL) {
+	    return TCL_ERROR;
+	}
+#endif
+	cachePtr = (NSVGcache *) ckalloc(sizeof(NSVGcache));
+	cachePtr->dataOrChan = NULL;
+	Tcl_DStringInit(&cachePtr->formatString);
+	cachePtr->nsvgImage = NULL;
+	Tcl_SetAssocData(interp, "tksvgnano", FreeCache, cachePtr);
+	Tk_CreatePhotoImageFormat(&tkImgFmtSVGnano);
+    }
+    tsdPtr = (ThreadSpecificData *)
+	    Tcl_GetThreadData(&dataKey, sizeof(ThreadSpecificData));
+    if (!tsdPtr->registered) {
+	Tk_CreatePhotoImageFormat(&tkImgFmtSVGnano);
+	tsdPtr->registered = 1;
+    }
+    return TCL_OK;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * RenderObjCmd --
+ *
+ *	This function is called to render SVG into a bytearray which
+ *	is returned in a dictionary object.
+ *
+ * Results:
+ *	Standard Tcl result.
+ *
+ *----------------------------------------------------------------------
+ */
+
+int
+RenderObjCmd(
+    ClientData clientData,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const *objv)
+{
+    double dpi = 96.0;
+    char unit[3], *p;
+    char *input, *inputCopy = NULL;
+    NSVGimage *nsvgImage = NULL;
+    int i, length, parameterScaleSeen = 0;
+    static const char *const rendOptions[] = {
+	"-dpi", "-scale", "-unit", "-x", "-y",
+	"-scaletoheight", "-scaletowidth", NULL
+    };
+    enum rendOptions {
+	OPT_DPI, OPT_SCALE, OPT_UNIT, OPT_X, OPT_Y,
+	OPT_SCALE_TO_HEIGHT, OPT_SCALE_TO_WIDTH
+    };
+    RastOpts ropt[1], *ropts = ropt;
+    int w, h;
+    NSVGrasterizer *rast = NULL;
+    unsigned char *imgData = NULL;
+    double scale;
+    Tcl_WideUInt wh;
+    Tcl_Obj *retObj;
+
+    if (objc < 2) {
+	Tcl_WrongNumArgs(interp, 1, objv, "svgstring ?options?");
+	return TCL_ERROR;
+    }
+
+    /*
+     * Process options.
+     */
+
+    strcpy(unit, "px");
+    ropts->x = ropts->y = 0.0;
+    ropts->scale = 1.0;
+    ropts->scaleToHeight = 0;
+    ropts->scaleToWidth = 0;
+    for (i = 2; i < objc; i++) {
+	int optIndex;
+
+	if (Tcl_GetIndexFromObjStruct(interp, objv[i], rendOptions,
+		sizeof(char *), "option", 0, &optIndex) == TCL_ERROR) {
+	    goto error;
+	}
+
+	if (++i >= objc) {
+	    Tcl_WrongNumArgs(interp, 1, objv, "value");
+	    goto error;
+	}
+
+	/*
+	 * check that only one scale option is given
+	 */
+	switch ((enum rendOptions) optIndex) {
+	case OPT_SCALE:
+	case OPT_SCALE_TO_HEIGHT:
+	case OPT_SCALE_TO_WIDTH:
+	    if (parameterScaleSeen) {
+		Tcl_SetObjResult(interp, Tcl_NewStringObj(
+			"only one of -scale, -scaletoheight, -scaletowidth may be given", -1));
+		Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "BAD_SCALE",
+			(char *) NULL);
+		goto error;
+	    }
+	    parameterScaleSeen = 1;
+	    break;
+	default:
+	    break;
+	}
+
+	/*
+	 * Decode parameters
+	 */
+	switch ((enum rendOptions) optIndex) {
+	case OPT_DPI:
+	    if (Tcl_GetDoubleFromObj(interp, objv[i], &dpi) == TCL_ERROR) {
+		goto error;
+	    }
+	    if (dpi < 0.0) {
+		Tcl_SetObjResult(interp, Tcl_NewStringObj(
+			"-dpi value must be positive", -1));
+		Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "BAD_DPI",
+			(char *) NULL);
+		goto error;
+	    }
+	    break;
+	case OPT_SCALE:
+	    if (Tcl_GetDoubleFromObj(interp, objv[i], &ropts->scale) ==
+		TCL_ERROR) {
+		goto error;
+	    }
+	    if (ropts->scale <= 0.0) {
+		Tcl_SetObjResult(interp, Tcl_NewStringObj(
+			"-scale value must be positive", -1));
+		Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "BAD_SCALE",
+			(char *) NULL);
+		goto error;
+	    }
+	    break;
+	case OPT_UNIT:
+	    p = Tcl_GetString(objv[i]);
+	    if ((p != NULL) && (p[0])) {
+		strncpy(unit, p, 3);
+		unit[2] = '\0';
+	    }
+	    break;
+	case OPT_X:
+	    if (Tcl_GetDoubleFromObj(interp, objv[i], &ropts->x) == TCL_ERROR) {
+		goto error;
+	    }
+	    break;
+	case OPT_Y:
+	    if (Tcl_GetDoubleFromObj(interp, objv[i], &ropts->y) == TCL_ERROR) {
+		goto error;
+	    }
+	    break;
+	case OPT_SCALE_TO_HEIGHT:
+	    if (Tcl_GetIntFromObj(interp, objv[i], &ropts->scaleToHeight) ==
+		TCL_ERROR) {
+		goto error;
+	    }
+	    if (ropts->scaleToHeight <= 0) {
+		Tcl_SetObjResult(interp, Tcl_NewStringObj(
+			"-scaletoheight value must be positive", -1));
+		Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "BAD_SCALE",
+			(char *) NULL);
+		goto error;
+	    }
+	    break;
+	case OPT_SCALE_TO_WIDTH:
+	    if (Tcl_GetIntFromObj(interp, objv[i], &ropts->scaleToWidth) ==
+		TCL_ERROR) {
+		goto error;
+	    }
+	    if (ropts->scaleToWidth <= 0) {
+		Tcl_SetObjResult(interp, Tcl_NewStringObj(
+			"-scaletowidth value must be positive", -1));
+		Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "BAD_SCALE",
+			(char *) NULL);
+		goto error;
+	    }
+	    break;
+	}
+    }
+
+    /*
+     * The parser destroys the original input string,
+     * therefore first duplicate.
+     */
+
+    input = Tcl_GetStringFromObj(objv[1], &length);
+    inputCopy = (char *) attemptckalloc(length+1);
+    if (inputCopy == NULL) {
+	Tcl_SetObjResult(interp,
+		Tcl_NewStringObj("cannot alloc data buffer", -1));
+	Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "OUT_OF_MEMORY",
+		(char *) NULL);
+	goto error;
+    }
+    memcpy(inputCopy, input, length);
+    inputCopy[length] = '\0';
+
+    nsvgImage = nsvgParse(inputCopy, unit, dpi);
+    if (nsvgImage == NULL) {
+	Tcl_SetObjResult(interp,
+		Tcl_NewStringObj("cannot parse SVG image", -1));
+	Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "PARSE_ERROR",
+		(char *) NULL);
+	goto error;
+    }
+    ckfree(inputCopy);
+    inputCopy = NULL;
+
+    scale = GetScaleFromParameters(nsvgImage, ropts, &w, &h);
+    rast = nsvgCreateRasterizer();
+    if (rast == NULL) {
+	Tcl_SetObjResult(interp,
+		Tcl_NewStringObj("cannot initialize rasterizer", -1));
+	Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "RASTERIZER_ERROR",
+		(char *) NULL);
+	goto error;
+    }
+
+    wh = (Tcl_WideUInt) w * (Tcl_WideUInt) h;
+    if ((w < 0) || (h < 0) || (w * 4 < 0) || (wh > INT_MAX / 4)) {
+	Tcl_SetObjResult(interp, Tcl_NewStringObj("image size overflow", -1));
+	Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "IMAGE_SIZE_OVERFLOW",
+		(char *) NULL);
+	goto error;
+    }
+
+    imgData = (unsigned char *) attemptckalloc(wh *4);
+    if (imgData == NULL) {
+	Tcl_SetObjResult(interp,
+		Tcl_NewStringObj("cannot alloc image buffer", -1));
+	Tcl_SetErrorCode(interp, "TK", "IMAGE", "SVG", "OUT_OF_MEMORY",
+		(char *) NULL);
+	goto error;
+    }
+    nsvgRasterize(rast, nsvgImage, ropts->x, ropts->y,
+	    (float) scale, imgData, w, h, w * 4);
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(nsvgImage);
+
+    /* make result dictionary */
+    retObj = Tcl_NewDictObj();
+    Tcl_DictObjPut(interp, retObj, Tcl_NewStringObj("width", -1),
+	Tcl_NewIntObj(w));
+    Tcl_DictObjPut(interp, retObj, Tcl_NewStringObj("height", -1),
+	Tcl_NewIntObj(w));
+    Tcl_DictObjPut(interp, retObj, Tcl_NewStringObj("channels", -1),
+	Tcl_NewIntObj(4));
+    Tcl_DictObjPut(interp, retObj, Tcl_NewStringObj("data", -1),
+	Tcl_NewByteArrayObj(imgData, w * h * 4));
+    ckfree(imgData);
+    Tcl_SetObjResult(interp, retObj);
+    return TCL_OK;
+
+error:
+    if (inputCopy != NULL) {
+	ckfree(inputCopy);
+    }
+    if (imgData != NULL) {
+	ckfree(imgData);
+    }
+    if (rast != NULL) {
+	nsvgDeleteRasterizer(rast);
+    }
+    if (nsvgImage != NULL) {
+	nsvgDelete(nsvgImage);
+    }
+    return TCL_ERROR;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * Tksvg_Init --
+ *
+ *	This function is called to initialize the "tksvg" package.
+ *
+ * Results:
+ *	Standard Tcl return code.
+ *
+ *----------------------------------------------------------------------
+ */
 
 int DLLEXPORT
 Tksvg_Init(Tcl_Interp *interp)
 {
+    Tcl_Namespace *nsPtr;
+    NSVGcache *cachePtr;
+    int haveTk = 0;
+    Tcl_Obj *str2[2], *cmdList;
+    Tcl_Command cmd;
+
     if (interp == NULL) {
         return TCL_ERROR;
     }
@@ -919,16 +1260,49 @@ Tksvg_Init(Tcl_Interp *interp)
 	return TCL_ERROR;
     }
 #endif
+    if (Tcl_PkgPresent(interp, "Tk", TK_VERSION, 1) != NULL) {
 #ifdef USE_TK_STUBS
-    if (Tk_InitStubs(interp, TCL_VERSION, 0) == NULL) {
-	return TCL_ERROR;
-    }
+	if (Tk_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+	    return TCL_ERROR;
+	}
 #else
-    if (Tcl_PkgRequire(interp, "Tk", TK_VERSION, 0) == NULL) {
+	if (Tcl_PkgRequire(interp, "Tk", TK_VERSION, 0) == NULL) {
+	    return TCL_ERROR;
+	}
+#endif
+	haveTk = 1;
+    }
+    nsPtr = Tcl_CreateNamespace(interp, "tksvg", NULL, NULL);
+    if (nsPtr == NULL) {
 	return TCL_ERROR;
     }
-#endif
-    Tk_CreatePhotoImageFormat(&tkImgFmtSVGnano);
+    if (haveTk) {
+	cachePtr = (NSVGcache *) Tcl_GetAssocData(interp, "tksvgnano", NULL);
+	if (cachePtr == NULL) {
+	    ThreadSpecificData *tsdPtr;
+
+    cachePtr = (NSVGcache *) ckalloc(sizeof(NSVGcache));
+	    cachePtr->dataOrChan = NULL;
+	    Tcl_DStringInit(&cachePtr->formatString);
+	    cachePtr->nsvgImage = NULL;
+	    Tcl_SetAssocData(interp, "tksvgnano", FreeCache, cachePtr);
+	    tsdPtr = (ThreadSpecificData *)
+		    Tcl_GetThreadData(&dataKey, sizeof(ThreadSpecificData));
+	    if (!tsdPtr->registered) {
+		Tk_CreatePhotoImageFormat(&tkImgFmtSVGnano);
+		tsdPtr->registered = 1;
+	    }
+	}
+    }
+    str2[0] = Tcl_NewStringObj("register", -1);
+    str2[1] = Tcl_NewStringObj("render", -1);
+    cmdList = Tcl_NewListObj(2, str2);
+    cmd = Tcl_CreateEnsemble(interp, "::tksvg", nsPtr, TCL_ENSEMBLE_PREFIX);
+    Tcl_SetEnsembleSubcommandList(interp, cmd, cmdList);
+    Tcl_CreateObjCommand(interp, "::tksvg::register", RegisterObjCmd,
+	    (ClientData) NULL, (Tcl_CmdDeleteProc *) NULL);
+    Tcl_CreateObjCommand(interp, "::tksvg::render", RenderObjCmd,
+	    (ClientData) NULL, (Tcl_CmdDeleteProc *) NULL);    Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION);
     Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION);
     return TCL_OK;
 }
