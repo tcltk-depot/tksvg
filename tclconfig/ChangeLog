@@ -206,13 +206,13 @@
 2010-04-14  Jan Nijtmans  <nijtmans@users.sf.net>
 
 	* tcl.m4    - Backport a lot of quoting fixes from tcl8.6/unix/tcl.m4
-	            - Fix determination of CYGPATH for CYGWIN
+		    - Fix determination of CYGPATH for CYGWIN
 	  With those fixes, itcl and tdbc compile fine with CYGWIN
 
 2010-04-06  Jan Nijtmans  <nijtmans@users.sf.net>
 
 	* install-sh         [Bug 2982540] configure and install* script files
-	                     should always have LF
+			     should always have LF
 
 2010-02-19  Stuart Cassoff  <stwo@users.sourceforge.net>
 
@@ -266,7 +266,7 @@
 2008-12-21  Jan Nijtmans  <nijtmans@users.sf.net>
 
 	* tcl.m4: [Bug 2073255] Tcl_GetString(NULL) doesn't crash on HP-UX
-	          (this bug report was for Tcl, but holds for TEA as well.)
+		  (this bug report was for Tcl, but holds for TEA as well.)
 
 2008-12-20  Daniel Steffen  <das@users.sourceforge.net>
 
@@ -327,7 +327,7 @@
 
 2007-09-15  Daniel Steffen  <das@users.sourceforge.net>
 
-	* tcl.m4: 	replace all direct references to compiler by ${CC} to
+	* tcl.m4:	replace all direct references to compiler by ${CC} to
 			enable CC overriding at configure & make time.
 	(SunOS-5.1x):	replace direct use of '/usr/ccs/bin/ld' in SHLIB_LD by
 			'cc' compiler driver.
