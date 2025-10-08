@@ -47,6 +47,11 @@ extern "C" {
 #define NANOSVG_free free
 #endif
 
+/* for MS-VC6-10, define isnan */
+#if defined(_MSC_VER) && _MSC_VER <= 1600
+#define isnan(a) _isnan(a)
+#endif
+
 typedef struct NSVGrasterizer NSVGrasterizer;
 
 /* Example Usage:
