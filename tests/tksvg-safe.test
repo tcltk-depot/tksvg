@@ -1,0 +1,106 @@
+package require tcltest 2
+namespace import -force ::tcltest::*
+
+package require Tk
+package require tksvg
+
+::safe::interpCreate safeInterp
+safe::loadTk safeInterp
+safeInterp eval package require tksvg
+
+set smallImage {<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width='14' height='8' version='1.1' xmlns='http://www.w3.org/2000/svg'>
+ <circle cx='7' cy='4' r='3' fill='#141312'/>
+</svg>}
+
+
+test tksvg-unsafe-1.1 "create from file" -constraints {} -setup {
+} -body {
+    image create photo small -file small.svg
+} -cleanup {
+    image delete small
+} -result small
+
+test tksvg-unsafe-1.2 "create from data" -constraints {} -setup {
+} -body {
+    image create photo small -data $smallImage
+} -cleanup {
+    image delete small
+} -result small
+
+test tksvg-unsafe-1.3 "read from file" -constraints {} -setup {
+    image create photo small
+} -body {
+    small read small.svg
+} -cleanup {
+    image delete small
+} -result {}
+
+test tksvg-unsafe-1.4 "write to file as SVG" -constraints {} -setup {
+    image create photo small -data $smallImage
+} -body {
+    small write .tmp-small-out.svg
+} -cleanup {
+    image delete small
+    file delete .tmp-small-out.svg
+} -returnCodes 1 -result {image file format "svg" has no file writing capability}
+
+test tksvg-unsafe-1.5 "write to file as PNG" -constraints {} -setup {
+    image create photo small -data $smallImage
+} -body {
+    small write .tmp-small-out.png -format PNG
+} -cleanup {
+    image delete small
+    file delete .tmp-small-out.png
+} -result {}
+
+test tksvg-safe-2.1 "create from file, safe interp" -constraints {} -setup {
+} -body {
+    safeInterp eval image create photo small -file small.svg
+} -cleanup {
+    catch {safeInterp eval image delete small}
+} -returnCodes 1 -result {can't get image from a file in a safe interpreter}
+
+test tksvg-safe-2.2 "create from data, safe interp" -constraints {} -setup {
+} -body {
+    safeInterp eval [list image create photo small -data $smallImage]
+} -cleanup {
+    catch {safeInterp eval image delete small}
+} -result small
+
+test tksvg-safe-2.3 "read from file, safe interp" -constraints {} -setup {
+    safeInterp eval image create photo small
+} -body {
+    safeInterp eval small read small.svg
+} -cleanup {
+    catch {safeInterp eval image delete small}
+} -returnCodes 1 -result {can't get image from a file in a safe interpreter}
+
+test tksvg-safe-2.4 "write to file as SVG, safe interp" -constraints {} -setup {
+    safeInterp eval [list image create photo small -data $smallImage]
+} -body {
+    safeInterp eval small write .tmp-small-out.svg
+} -cleanup {
+    catch {safeInterp eval image delete small}
+    catch {file delete .tmp-small-out.svg}
+} -returnCodes 1 -result {can't write image to a file in a safe interpreter}
+
+test tksvg-safe-2.5 "write to file as PNG, safe interp" -constraints {} -setup {
+    safeInterp eval [list image create photo small -data $smallImage]
+} -body {
+    safeInterp eval small write .tmp-small-out.png -format PNG
+} -cleanup {
+    catch {safeInterp eval image delete small}
+    catch {file delete .tmp-small-out.png}
+} -returnCodes 1 -result {can't write image to a file in a safe interpreter}
+
+
+# cleanup
+safe::interpDelete safeInterp
+::tcltest::cleanupTests
+return
+
+# Local Variables:
+# mode: tcl
+# End:
+
